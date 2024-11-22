@@ -9,3 +9,10 @@ openai
 pypdf
 loguru
 docx2txt
+streamlit
+langchain[all]
+transformers
+torch
+tensorflow
+langchain-community
+requests
