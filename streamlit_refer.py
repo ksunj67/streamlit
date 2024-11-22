@@ -10,23 +10,23 @@ from langchain.document_loaders import Docx2txtLoader
 from langchain.document_loaders import UnstructuredPowerPointLoader
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings #한국어에 특화된 임베딩 모델
+from langchain.embeddings import HuggingFaceEmbeddings
 
 from langchain.memory import ConversationBufferMemory
-from langchain.vectorstores import FAISS #벡터저장소
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from langchain.vectorstores import FAISS
 
 # from streamlit_chat import message
+from langchain.callbacks import get_openai_callback
 from langchain.memory import StreamlitChatMessageHistory
 
 def main():
-    st.set_page_config(  #탭에 써져있는 이름과 아이콘
+    st.set_page_config(
     page_title="DirChat",
     page_icon=":books:")
 
-    st.title("_Private Data :red[QA Chat]_ :books:") #제목
+    st.title("_Private Data :red[QA Chat]_ :books:")
 
-    if "conversation" not in st.session_state:  
+    if "conversation" not in st.session_state:
         st.session_state.conversation = None
 
     if "chat_history" not in st.session_state:
@@ -36,19 +36,18 @@ def main():
         st.session_state.processComplete = None
 
     with st.sidebar:
-        uploaded_files = st.file_uploader("Upload your file", type=['pdf', 'docx'], accept_multiple_files=True)
+        uploaded_files =  st.file_uploader("Upload your file",type=['pdf','docx'],accept_multiple_files=True)
+        openai_api_key = st.text_input("OpenAI API Key", key="chatbot_api_key", type="password")
         process = st.button("Process")
-        
-    if process:  # 만약 process 버튼을 누르면
-        if not uploaded_files:
-            st.info("Please upload at least one file to continue.")
+    if process:
+        if not openai_api_key:
+            st.info("Please add your OpenAI API key to continue.")
             st.stop()
-
-        files_text = get_text(uploaded_files)  # 파일을 텍스트로 변환
-        text_chunks = get_text_chunks(files_text)  # 텍스트를 여러 개의 청크로 나누고
-        vetorestore = get_vectorstore(text_chunks)  # 벡터화
+        files_text = get_text(uploaded_files)
+        text_chunks = get_text_chunks(files_text)
+        vetorestore = get_vectorstore(text_chunks)
      
-        st.session_state.conversation = get_conversation_chain(vetorestore)  # 벡터를 통해 체인을 구성
+        st.session_state.conversation = get_conversation_chain(vetorestore,openai_api_key) 
 
         st.session_state.processComplete = True
 
@@ -73,7 +72,7 @@ def main():
             chain = st.session_state.conversation
 
             with st.spinner("Thinking..."):
-                result = chain({"question": query}) #로딩중일때
+                result = chain({"question": query})
                 with get_openai_callback() as cb:
                     st.session_state.chat_history = result['chat_history']
                 response = result['answer']
@@ -119,11 +118,10 @@ def get_text(docs):
 
 
 def get_text_chunks(text):
-    tokenizer = AutoTokenizer.from_pretrained("jhgan/ko-sroberta-multitask")
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=900,
         chunk_overlap=100,
-        length_function=lambda text: len(tokenizer.encode(text))
+        length_function=tiktoken_len
     )
     chunks = text_splitter.split_documents(text)
     return chunks
@@ -138,30 +136,17 @@ def get_vectorstore(text_chunks):
     vectordb = FAISS.from_documents(text_chunks, embeddings)
     return vectordb
 
-def get_conversation_chain(vetorestore, api_key=None):  # OpenAI API Key 제거
-    # Hugging Face 모델 로드
-    model_name = "EleutherAI/polyglot-ko-1.3b"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    
-    # Chat pipeline 생성
-    chat_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer, device=0 if torch.cuda.is_available() else -1)
-
-    def chat_model(question):
-        # 입력 질문에 대한 응답 생성
-        response = chat_pipeline(question, max_length=500, num_return_sequences=1)
-        return response[0]["generated_text"]
-
-    # Conversation Chain 정의
-    def conversation_chain(input_data):
-        question = input_data["question"]
-        retriever = vetorestore.as_retriever(search_type='mmr', verbose=True)
-        documents = retriever.get_relevant_documents(question)
-        retrieved_text = "\n".join([doc.page_content for doc in documents])
-
-        # 생성된 답변
-        answer = chat_model(f"문서 내용: {retrieved_text}\n질문: {question}")
-        return {"answer": answer, "source_documents": documents}
+def get_conversation_chain(vetorestore,openai_api_key):
+    llm = ChatOpenAI(openai_api_key=openai_api_key, model_name = 'gpt-3.5-turbo',temperature=0)
+    conversation_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm, 
+            chain_type="stuff", 
+            retriever=vetorestore.as_retriever(search_type = 'mmr', vervose = True), 
+            memory=ConversationBufferMemory(memory_key='chat_history', return_messages=True, output_key='answer'),
+            get_chat_history=lambda h: h,
+            return_source_documents=True,
+            verbose = True
+        )
 
     return conversation_chain
 
